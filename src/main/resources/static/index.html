@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Корпоративный справочник</title>
+<style>
+  body { font-family: Arial, sans-serif; max-width: 1000px; margin: 20px auto; padding: 0 12px; }
+  input, select, button { padding: 6px 10px; margin: 3px 0; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  th, td { border: 1px solid #ccc; padding: 6px; text-align: left; }
+  th { background: #f0f0f0; }
+  .hidden { display: none; }
+  .bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .err { color: #c00; }
+  .wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<h1>Корпоративный справочник сотрудников</h1>
+
+<!-- Вход -->
+<div id="loginBox">
+  <input id="login" placeholder="Логин" value="user">
+  <input id="password" type="password" placeholder="Пароль" value="user123">
+  <button onclick="doLogin()">Войти</button>
+  <span id="loginErr" class="err"></span>
+  <p><small>Тестовые: admin/admin123, hr/hr123, user/user123</small></p>
+</div>
+
+<!-- Основной экран -->
+<div id="app" class="hidden">
+  <div class="bar">
+    <b id="who"></b>
+    <button onclick="logout()">Выйти</button>
+  </div>
+
+  <div class="bar">
+    <input id="search" placeholder="Поиск: имя, должность, телефон, email" oninput="loadContacts()">
+    <select id="depFilter" onchange="loadContacts()"><option value="">Все отделы</option></select>
+    <label><input type="checkbox" id="onlyFav" onchange="loadContacts()"> Только избранное</label>
+  </div>
+
+  <!-- Форма для HR и ADMIN -->
+  <fieldset id="addBox" class="hidden">
+    <legend>Добавить сотрудника (HR / ADMIN)</legend>
+    <input id="fFullName" placeholder="ФИО">
+    <input id="fPosition" placeholder="Должность">
+    <input id="fPhone" placeholder="Телефон">
+    <input id="fEmail" placeholder="Email">
+    <select id="fDep"></select>
+    <button onclick="addContact()">Добавить</button>
+  </fieldset>
+
+  <!-- Форма для ADMIN -->
+  <fieldset id="depBox" class="hidden">
+    <legend>Новый отдел (ADMIN)</legend>
+    <input id="fDepName" placeholder="Название отдела">
+    <button onclick="addDepartment()">Добавить</button>
+    <div id="depList"></div>
+  </fieldset>
+
+  <div class="wrap">
+    <table>
+      <thead><tr><th>★</th><th>ФИО</th><th>Должность</th><th>Отдел</th><th>Телефон</th><th>Email</th><th id="thAct"></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <p id="msg" class="err"></p>
+</div>
+
+<script>
+let auth = null, me = null, favIds = new Set();
+
+// Запрос к API с Basic-авторизацией
+async function api(url, method = 'GET', body = null) {
+  const res = await fetch(url, {
+    method,
+    headers: { 'Authorization': auth, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : null
+  });
+  if (!res.ok) {
+    let text = '';
+    try { text = (await res.json()).message || ''; } catch (e) {}
+    throw new Error(res.status === 403 ? 'Недостаточно прав' : (text || 'Ошибка ' + res.status));
+  }
+  return res.status === 204 || res.status === 201 && res.headers.get('content-length') === '0' ? null
+       : res.json().catch(() => null);
+}
+
+async function doLogin() {
+  auth = 'Basic ' + btoa(unescape(encodeURIComponent(
+    document.getElementById('login').value + ':' + document.getElementById('password').value)));
+  try {
+    me = await api('/api/me');
+  } catch (e) {
+    document.getElementById('loginErr').textContent = 'Неверный логин или пароль';
+    return;
+  }
+  document.getElementById('loginBox').classList.add('hidden');
+  document.getElementById('app').classList.remove('hidden');
+  document.getElementById('who').textContent = me.username + ' (' + me.role + ')';
+  const canEdit = me.role === 'HR' || me.role === 'ADMIN';
+  document.getElementById('thAct').classList.toggle('hidden', !canEdit);
+  document.getElementById('addBox').classList.toggle('hidden', !canEdit);
+  document.getElementById('depBox').classList.toggle('hidden', me.role !== 'ADMIN');
+  await loadDepartments();
+  await loadContacts();
+}
+
+function logout() { location.reload(); }
+
+async function loadDepartments() {
+  const deps = await api('/api/departments');
+  const opts = deps.map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
+  document.getElementById('fDep').innerHTML = opts;
+  const cur = document.getElementById('depFilter').value;
+  document.getElementById('depFilter').innerHTML = '<option value="">Все отделы</option>' + opts;
+  document.getElementById('depFilter').value = cur;
+  document.getElementById('depList').innerHTML = deps.map(d =>
+    `<span style="display:inline-block;margin:4px 8px 0 0;padding:2px 6px;border:1px solid #ccc">
+       ${esc(d.name)} <button onclick="delDepartment(${d.id})">✕</button></span>`).join('');
+}
+
+async function loadContacts() {
+  const q = encodeURIComponent(document.getElementById('search').value);
+  const dep = document.getElementById('depFilter').value;
+  let url = '/api/contacts?search=' + q + (dep ? '&departmentId=' + dep : '');
+  const [list, favs] = await Promise.all([api(url), api('/api/favorites')]);
+  favIds = new Set(favs.map(f => f.id));
+  const onlyFav = document.getElementById('onlyFav').checked;
+  const canEdit = me.role === 'HR' || me.role === 'ADMIN';
+  document.getElementById('rows').innerHTML = list
+    .filter(c => !onlyFav || favIds.has(c.id))
+    .map(c => `<tr>
+      <td><button onclick="toggleFav(${c.id})">${favIds.has(c.id) ? '★' : '☆'}</button></td>
+      <td>${esc(c.fullName)}</td><td>${esc(c.position)}</td>
+      <td>${c.department ? esc(c.department.name) : ''}</td>
+      <td>${esc(c.phone)}</td><td>${esc(c.email)}</td>
+      ${canEdit ? `<td><button onclick="delContact(${c.id})">Удалить</button></td>` : ''}
+    </tr>`).join('');
+}
+
+async function toggleFav(id) {
+  await run(() => api('/api/favorites/' + id, favIds.has(id) ? 'DELETE' : 'POST'));
+}
+
+async function addContact() {
+  const dep = document.getElementById('fDep').value;
+  await run(() => api('/api/contacts', 'POST', {
+    fullName: document.getElementById('fFullName').value,
+    position: document.getElementById('fPosition').value,
+    phone: document.getElementById('fPhone').value,
+    email: document.getElementById('fEmail').value,
+    department: dep ? { id: Number(dep) } : null
+  }));
+  ['fFullName', 'fPosition', 'fPhone', 'fEmail'].forEach(i => document.getElementById(i).value = '');
+}
+
+async function delContact(id) {
+  if (confirm('Удалить сотрудника?')) await run(() => api('/api/contacts/' + id, 'DELETE'));
+}
+
+async function addDepartment() {
+  await run(() => api('/api/departments', 'POST', { name: document.getElementById('fDepName').value }));
+  document.getElementById('fDepName').value = '';
+  await loadDepartments();
+}
+  async function delDepartment(id) {
+  if (!confirm('Удалить отдел?')) return;
+  await run(() => api('/api/departments/' + id, 'DELETE'));
+  await loadDepartments();
+}
+
+
+// Выполнить действие, показать ошибку, обновить таблицу
+async function run(action) {
+  document.getElementById('msg').textContent = '';
+  try { await action(); } catch (e) { document.getElementById('msg').textContent = e.message; }
+  await loadContacts();
+}
+
+function esc(s) {
+  return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+</script>
+</body>
+</html>
